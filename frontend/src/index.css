@@ -1,0 +1,118 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500;600;700&family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap');
+
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Theme variables */
+:root {
+  --bg-page: #f8fafc;
+  --bg-card: #ffffff;
+  --border-card: #e2e8f0;
+  --text-main: #0f172a;
+  --text-muted: #475569;
+  
+  --bg-field: #f8fafc;
+  --border-field: #cbd5e1;
+  --text-field: #0f172a;
+}
+
+.dark {
+  --bg-page: #0b0f19;
+  --bg-card: rgba(17, 25, 40, 0.75);
+  --border-card: rgba(255, 255, 255, 0.08);
+  --text-main: #f3f4f6;
+  --text-muted: #94a3b8;
+  
+  --bg-field: #070a13;
+  --border-field: rgba(255, 255, 255, 0.08);
+  --text-field: #f3f4f6;
+}
+
+@theme {
+  --font-sans: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'DM Sans', sans-serif;
+  --font-mono: 'DM Sans', sans-serif;
+  
+  /* Brand colors */
+  --color-brand-50: #f0f4fa;
+  --color-brand-100: #dce5f5;
+  --color-brand-200: #c0d1ee;
+  --color-brand-500: #4f46e5;
+  --color-brand-600: #4338ca;
+  --color-brand-700: #3730a3;
+  --color-brand-900: #0f172a;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+  background-color: var(--bg-page);
+  color: var(--text-main);
+  transition: background-color 0.25s ease, color 0.25s ease;
+  scroll-behavior: smooth;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Theme-adaptable card utility class */
+.glass {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border-card) !important;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05) !important;
+  color: var(--text-main) !important;
+  transition: background-color 0.25s, border-color 0.25s, color 0.25s, box-shadow 0.25s;
+}
+
+.dark .glass {
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.15) !important;
+  backdrop-filter: blur(12px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(12px) saturate(180%) !important;
+}
+
+/* Global input fields styling syncing with light/dark theme variables */
+input, select, textarea {
+  background-color: var(--bg-field) !important;
+  border: 1px solid var(--border-field) !important;
+  color: var(--text-field) !important;
+  transition: background-color 0.25s, border-color 0.25s, color 0.25s, box-shadow 0.2s;
+}
+
+input:focus, select:focus, textarea:focus {
+  border-color: #6366f1 !important;
+  outline: none;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-page);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-field);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Specific override for borderless search fields */
+input.search-input-field {
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+input.search-input-field:focus {
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
