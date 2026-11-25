@@ -42,17 +42,17 @@ const getDisciplineStatus = (offenceCount) => {
   if (offenceCount >= 4) {
     return {
       text: 'Surat Dikeluarkan',
-      className: 'inline-flex items-center justify-center px-3 py-1 rounded-md text-[11px] font-bold bg-[#260e15] dark:bg-[#3b0b14] text-[#f43f5e] border border-[#e11d48]/20'
+      className: 'inline-flex items-center justify-center px-3 py-1 rounded-md text-[11px] font-bold whitespace-nowrap bg-rose-50 dark:bg-[#3b0b14] text-rose-700 dark:text-[#f43f5e] border border-rose-200 dark:border-[#e11d48]/25'
     };
   } else if (offenceCount > 0) {
     return {
       text: 'Dalam Pemantauan',
-      className: 'inline-flex items-center justify-center px-3 py-1 rounded-md text-[11px] font-bold bg-[#fef3c7] dark:bg-[#78350f]/35 text-[#d97706] dark:text-[#fbbf24] border border-[#f59e0b]/25 dark:border-[#d97706]/20'
+      className: 'inline-flex items-center justify-center px-3 py-1 rounded-md text-[11px] font-bold whitespace-nowrap bg-[#fef3c7] dark:bg-[#78350f]/35 text-[#d97706] dark:text-[#fbbf24] border border-[#f59e0b]/25 dark:border-[#d97706]/20'
     };
   } else {
     return {
       text: 'Bersih',
-      className: 'inline-flex items-center justify-center px-3 py-1 rounded-md text-[11px] font-bold bg-[#ecfdf5] dark:bg-[#064e3b]/30 text-[#059669] dark:text-[#34d399] border border-[#10b981]/20 dark:border-[#059669]/15'
+      className: 'inline-flex items-center justify-center px-3 py-1 rounded-md text-[11px] font-bold whitespace-nowrap bg-[#ecfdf5] dark:bg-[#064e3b]/30 text-[#059669] dark:text-[#34d399] border border-[#10b981]/20 dark:border-[#059669]/15'
     };
   }
 };
@@ -830,11 +830,11 @@ const Students = () => {
                       {/* KES COUNT */}
                       <td className="py-3 px-3 text-center">
                         <span
-                          className={`inline-flex items-center justify-center px-2.5 py-0.5 rounded text-xs font-bold ${student.offenceCount >= 4
-                            ? 'bg-rose-950/70 dark:bg-rose-950/80 text-rose-500 dark:text-rose-400 border border-rose-900/30'
+                          className={`inline-flex items-center justify-center px-2.5 py-0.5 rounded text-xs font-bold whitespace-nowrap ${student.offenceCount >= 4
+                            ? 'bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-400 border border-rose-200 dark:border-rose-900/40'
                             : student.offenceCount > 0
                               ? 'bg-amber-100 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 border border-amber-200/50 dark:border-amber-900/20'
-                              : 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-550 border border-slate-200/20'
+                              : 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500 border border-slate-200/20'
                             }`}
                         >
                           {student.offenceCount} kes

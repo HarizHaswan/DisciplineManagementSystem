@@ -41,19 +41,31 @@ export const getAllWarningLetters = async (req, res) => {
             kursus: true,
           }
         },
-        records: {
-          include: {
-            offenceType: true,
-            teacher: true,
-          },
-          orderBy: { date: 'asc' },
-        },
       },
       orderBy: { issuedDate: 'desc' },
     });
 
+    const studentIds = [...new Set(warningLetters.map((wl) => wl.studentId))];
+    const allStudentRecords = studentIds.length > 0
+      ? await prisma.disciplinaryRecord.findMany({
+          where: {
+            studentId: { in: studentIds },
+            warningLetterId: { not: null },
+          },
+          include: {
+            offenceType: true,
+            teacher: true,
+            warningLetter: { select: { warningTier: true } },
+          },
+          orderBy: [{ date: 'asc' }, { id: 'asc' }],
+        })
+      : [];
+
     const formatted = warningLetters.map((wl) => ({
       ...wl,
+      records: allStudentRecords
+        .filter((rec) => rec.studentId === wl.studentId && rec.warningLetter?.warningTier <= wl.warningTier)
+        .map(({ warningLetter: _wl, ...rec }) => rec),
       student: {
         ...wl.student,
         kursusCode: wl.student.kursus.code,
@@ -309,10 +321,6 @@ export const getWarningLetterPDF = async (req, res) => {
             kursus: true,
           }
         },
-        records: {
-          include: { offenceType: true },
-          orderBy: { date: 'asc' },
-        },
       },
     });
 
@@ -325,6 +333,18 @@ export const getWarningLetterPDF = async (req, res) => {
       return res.status(403).json({ message: 'Teachers are not authorized to preview warning letter drafts.' });
     }
 
+    // Include all offences committed by the student up to this warning tier
+    const cumulativeRecords = await prisma.disciplinaryRecord.findMany({
+      where: {
+        studentId: warningLetter.studentId,
+        warningLetter: {
+          warningTier: { lte: warningLetter.warningTier },
+        },
+      },
+      include: { offenceType: true },
+      orderBy: [{ date: 'asc' }, { id: 'asc' }],
+    });
+
     // Adapt format to match what PDF generator expects
     const studentWithDynamicClass = {
       ...warningLetter.student,
@@ -334,7 +354,7 @@ export const getWarningLetterPDF = async (req, res) => {
 
     const pdfBytes = await generateWarningPDF(
       studentWithDynamicClass,
-      warningLetter.records,
+      cumulativeRecords,
       warningLetter.warningTier
     );
 

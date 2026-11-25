@@ -189,9 +189,8 @@ export const generateWarningPDF = async (student, records, warningIndex) => {
   currentY -= rowHeight;
 
   // Render Rows
-  const listRecords = records.slice(0, Math.max(3, warningIndex + 2));
   let count = 1;
-  for (const rec of listRecords) {
+  for (const rec of records) {
     const recDate = new Date(rec.date).toLocaleDateString('sv-SE'); // YYYY-MM-DD format
     const category = rec.offenceType.category === 'Major' ? 'Serius' : rec.offenceType.category === 'Medium' ? 'Sederhana' : 'Ringan';
     const offenceName = rec.offenceType.name.substring(0, 52); // Ensure it fits comfortably
