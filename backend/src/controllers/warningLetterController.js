@@ -1,78 +1,129 @@
-import { prisma } from '../config/db.js';
+import { query, queryOne, withTransaction } from '../config/db.js';
+import { mapOffence, mapStudent } from '../config/rows.js';
 import { generateWarningPDF } from '../services/pdfService.js';
 
 const getClassName = (semester, programType, kursusCode) => {
   if (programType === 'SVM') {
     return `${semester} SVM ${kursusCode}`;
-  } else {
-    // DVM Sem 5-9 maps to 1-5 DVM
-    return `${semester - 4} DVM ${kursusCode}`;
   }
+  return `${semester - 4} DVM ${kursusCode}`;
 };
 
-// GET /api/warning-letters - List warning letters, filter by student, month, status
+const STUDENT_WITH_KURSUS = `
+  SELECT s.*, k.id AS kursus_id, k.code AS kursus_code, k.name AS kursus_name
+  FROM \`Student\` s
+  JOIN \`Kursus\` k ON k.id = s.kursusId
+`;
+
+function presentStudent(row) {
+  const student = mapStudent(row);
+  return {
+    ...student,
+    program: student.kursus.name,
+    kursusCode: student.kursus.code,
+    kursusName: student.kursus.name,
+    className: getClassName(student.semester, student.programType, student.kursus.code),
+  };
+}
+
 export const getAllWarningLetters = async (req, res) => {
   try {
     const { month, studentId, status } = req.query;
     const userRole = req.user.role;
-
-    const whereClause = {};
+    const where = [];
+    const params = [];
 
     if (studentId) {
-      whereClause.studentId = parseInt(studentId);
+      where.push('wl.studentId = ?');
+      params.push(String(studentId));
     }
 
     if (month) {
-      whereClause.month = month;
+      where.push('wl.month = ?');
+      params.push(month);
     }
 
-    // Teachers can only view ISSUED warning letters
     if (userRole === 'TEACHER') {
-      whereClause.status = 'ISSUED';
+      where.push("wl.status = 'ISSUED'");
     } else if (status) {
-      whereClause.status = status;
+      where.push('wl.status = ?');
+      params.push(status);
     }
 
-    const warningLetters = await prisma.warningLetter.findMany({
-      where: whereClause,
-      include: {
-        student: {
-          include: {
-            kursus: true,
-          }
-        },
-      },
-      orderBy: { issuedDate: 'desc' },
-    });
+    const warningLetters = await query(
+      `SELECT wl.id, wl.studentId, wl.warningTier, wl.issuedDate, wl.status, wl.month, wl.createdAt, wl.updatedAt,
+              s.studentNumber, s.icNumber, s.name, s.email, s.studentPhone, s.kursusId, s.cohort,
+              s.programType, s.semester, s.status AS studentStatus, s.parentName, s.parentPhone,
+              s.createdAt AS studentCreatedAt, s.updatedAt AS studentUpdatedAt,
+              k.id AS kursus_id, k.code AS kursus_code, k.name AS kursus_name
+       FROM \`WarningLetter\` wl
+       JOIN \`Student\` s ON s.studentNumber = wl.studentId
+       JOIN \`Kursus\` k ON k.id = s.kursusId
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY wl.issuedDate DESC`,
+      params
+    );
 
     const studentIds = [...new Set(warningLetters.map((wl) => wl.studentId))];
     const allStudentRecords = studentIds.length > 0
-      ? await prisma.disciplinaryRecord.findMany({
-          where: {
-            studentId: { in: studentIds },
-            warningLetterId: { not: null },
-          },
-          include: {
-            offenceType: true,
-            teacher: true,
-            warningLetter: { select: { warningTier: true } },
-          },
-          orderBy: [{ date: 'asc' }, { id: 'asc' }],
-        })
+      ? await query(
+          `SELECT r.id, r.studentId, r.offenceTypeId, r.teacherId, r.date, r.description, r.createdAt, r.warningLetterId,
+                  o.id AS offenceType_id, o.code AS offenceType_code, o.name AS offenceType_name,
+                  o.category AS offenceType_category, o.description AS offenceType_description,
+                  u.id AS teacher_id, u.name AS teacher_name, u.role AS teacher_role,
+                  w.warningTier
+           FROM \`DisciplinaryRecord\` r
+           JOIN \`OffenceType\` o ON o.id = r.offenceTypeId
+           JOIN \`User\` u ON u.id = r.teacherId
+           JOIN \`WarningLetter\` w ON w.id = r.warningLetterId
+           WHERE r.studentId IN (?)
+           ORDER BY r.date ASC, r.id ASC`,
+          [studentIds]
+        )
       : [];
 
-    const formatted = warningLetters.map((wl) => ({
-      ...wl,
-      records: allStudentRecords
-        .filter((rec) => rec.studentId === wl.studentId && rec.warningLetter?.warningTier <= wl.warningTier)
-        .map(({ warningLetter: _wl, ...rec }) => rec),
-      student: {
-        ...wl.student,
-        kursusCode: wl.student.kursus.code,
-        kursusName: wl.student.kursus.name,
-        className: getClassName(wl.student.semester, wl.student.programType, wl.student.kursus.code),
-      }
-    }));
+    const formatted = warningLetters.map((wl) => {
+      const student = presentStudent({
+        studentNumber: wl.studentNumber,
+        icNumber: wl.icNumber,
+        name: wl.name,
+        email: wl.email,
+        studentPhone: wl.studentPhone,
+        kursusId: wl.kursusId,
+        cohort: wl.cohort,
+        programType: wl.programType,
+        semester: wl.semester,
+        status: wl.studentStatus,
+        parentName: wl.parentName,
+        parentPhone: wl.parentPhone,
+        createdAt: wl.studentCreatedAt,
+        updatedAt: wl.studentUpdatedAt,
+        kursus_id: wl.kursus_id,
+        kursus_code: wl.kursus_code,
+        kursus_name: wl.kursus_name,
+      });
+
+      const records = allStudentRecords
+        .filter((rec) => rec.studentId === wl.studentId && rec.warningTier <= wl.warningTier)
+        .map((rec) => {
+          const offence = mapOffence(rec, { includeTeacher: true });
+          delete offence.warningLetter;
+          return offence;
+        });
+
+      return {
+        id: wl.id,
+        studentId: wl.studentId,
+        warningTier: wl.warningTier,
+        issuedDate: wl.issuedDate,
+        status: wl.status,
+        month: wl.month,
+        createdAt: wl.createdAt,
+        updatedAt: wl.updatedAt,
+        records,
+        student,
+      };
+    });
 
     return res.status(200).json(formatted);
   } catch (error) {
@@ -81,41 +132,55 @@ export const getAllWarningLetters = async (req, res) => {
   }
 };
 
-// GET /api/warning-letters/eligible - Get students qualifying for a new warning letter (Admin only)
 export const getEligibleStudents = async (req, res) => {
   try {
-    const students = await prisma.student.findMany({
-      include: {
-        kursus: true,
-        records: {
-          where: { warningLetterId: null },
-          include: { offenceType: true },
-          orderBy: { date: 'asc' },
-        },
-        warningLetters: {
-          orderBy: { warningTier: 'desc' },
-        },
-      },
-    });
+    const students = await query(STUDENT_WITH_KURSUS);
+    const unlinked = await query(
+      `SELECT r.id, r.studentId, r.offenceTypeId, r.teacherId, r.date, r.description, r.createdAt, r.warningLetterId,
+              o.id AS offenceType_id, o.code AS offenceType_code, o.name AS offenceType_name,
+              o.category AS offenceType_category, o.description AS offenceType_description
+       FROM \`DisciplinaryRecord\` r
+       JOIN \`OffenceType\` o ON o.id = r.offenceTypeId
+       WHERE r.warningLetterId IS NULL
+       ORDER BY r.date ASC, r.id ASC`
+    );
+    const letters = await query(
+      'SELECT studentId, warningTier FROM `WarningLetter` ORDER BY warningTier DESC'
+    );
+
+    const recordsByStudent = new Map();
+    for (const record of unlinked) {
+      const list = recordsByStudent.get(record.studentId) || [];
+      list.push(mapOffence(record));
+      recordsByStudent.set(record.studentId, list);
+    }
+
+    const highestTier = new Map();
+    for (const letter of letters) {
+      if (!highestTier.has(letter.studentId)) {
+        highestTier.set(letter.studentId, letter.warningTier);
+      }
+    }
 
     const eligible = [];
-
-    for (const student of students) {
-      const unlinkedCount = student.records.length;
-      const highestWarning = student.warningLetters[0]?.warningTier || 0;
+    for (const row of students) {
+      const student = mapStudent(row);
+      const records = recordsByStudent.get(student.studentNumber) || [];
+      const highestWarning = highestTier.get(student.studentNumber) || 0;
+      const unlinkedCount = records.length;
 
       let eligibleTier = 0;
       let offencesToLink = [];
 
       if (highestWarning === 0 && unlinkedCount >= 3) {
         eligibleTier = 1;
-        offencesToLink = student.records.slice(0, 3);
+        offencesToLink = records.slice(0, 3);
       } else if (highestWarning === 1 && unlinkedCount >= 1) {
         eligibleTier = 2;
-        offencesToLink = student.records.slice(0, 1);
+        offencesToLink = records.slice(0, 1);
       } else if (highestWarning === 2 && unlinkedCount >= 1) {
         eligibleTier = 3;
-        offencesToLink = student.records.slice(0, 1);
+        offencesToLink = records.slice(0, 1);
       }
 
       if (eligibleTier > 0) {
@@ -127,6 +192,7 @@ export const getEligibleStudents = async (req, res) => {
           kursusId: student.kursusId,
           kursusCode: student.kursus.code,
           kursusName: student.kursus.name,
+          program: student.kursus.name,
           cohort: student.cohort,
           programType: student.programType,
           semester: student.semester,
@@ -146,7 +212,6 @@ export const getEligibleStudents = async (req, res) => {
   }
 };
 
-// POST /api/warning-letters/generate - Create warning letter draft (Admin only)
 export const generateWarningLetter = async (req, res) => {
   try {
     const { studentId, tier } = req.body;
@@ -155,38 +220,39 @@ export const generateWarningLetter = async (req, res) => {
       return res.status(400).json({ message: 'studentId and tier are required.' });
     }
 
-    const student = await prisma.student.findUnique({
-      where: { studentNumber: String(studentId) },
-      include: {
-        records: {
-          where: { warningLetterId: null },
-          orderBy: { date: 'asc' },
-        },
-        warningLetters: {
-          orderBy: { warningTier: 'desc' },
-        },
-      },
-    });
-
+    const student = await queryOne(
+      `${STUDENT_WITH_KURSUS} WHERE s.studentNumber = ?`,
+      [String(studentId)]
+    );
     if (!student) {
       return res.status(404).json({ message: 'Student not found.' });
     }
 
-    const highestWarning = student.warningLetters[0]?.warningTier || 0;
+    const records = await query(
+      `SELECT id, date FROM \`DisciplinaryRecord\`
+       WHERE studentId = ? AND warningLetterId IS NULL
+       ORDER BY date ASC, id ASC`,
+      [student.studentNumber]
+    );
+    const highest = await queryOne(
+      'SELECT warningTier FROM `WarningLetter` WHERE studentId = ? ORDER BY warningTier DESC LIMIT 1',
+      [student.studentNumber]
+    );
+    const highestWarning = highest?.warningTier || 0;
 
     if (tier !== highestWarning + 1) {
-      return res.status(400).json({ 
-        message: `Invalid warning tier sequence. Student highest warning is ${highestWarning}, so next warning must be ${highestWarning + 1}.` 
+      return res.status(400).json({
+        message: `Invalid warning tier sequence. Student highest warning is ${highestWarning}, so next warning must be ${highestWarning + 1}.`,
       });
     }
 
     let offencesToLink = [];
-    if (tier === 1 && student.records.length >= 3) {
-      offencesToLink = student.records.slice(0, 3);
-    } else if (tier === 2 && student.records.length >= 1) {
-      offencesToLink = student.records.slice(0, 1);
-    } else if (tier === 3 && student.records.length >= 1) {
-      offencesToLink = student.records.slice(0, 1);
+    if (tier === 1 && records.length >= 3) {
+      offencesToLink = records.slice(0, 3);
+    } else if (tier === 2 && records.length >= 1) {
+      offencesToLink = records.slice(0, 1);
+    } else if (tier === 3 && records.length >= 1) {
+      offencesToLink = records.slice(0, 1);
     } else {
       return res.status(400).json({ message: 'Student does not qualify for this warning tier.' });
     }
@@ -194,26 +260,19 @@ export const generateWarningLetter = async (req, res) => {
     const currentDate = new Date();
     const monthStr = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
 
-    const warningLetter = await prisma.$transaction(async (tx) => {
-      const letter = await tx.warningLetter.create({
-        data: {
-          studentId: student.studentNumber,
-          warningTier: tier,
-          status: 'PENDING',
-          month: monthStr,
-        },
-      });
+    const warningLetter = await withTransaction(async (tx) => {
+      const created = await tx.query(
+        `INSERT INTO \`WarningLetter\` (studentId, warningTier, status, month, updatedAt)
+         VALUES (?, ?, 'PENDING', ?, NOW(3))`,
+        [student.studentNumber, tier, monthStr]
+      );
 
-      await tx.disciplinaryRecord.updateMany({
-        where: {
-          id: { in: offencesToLink.map((o) => o.id) },
-        },
-        data: {
-          warningLetterId: letter.id,
-        },
-      });
+      await tx.query(
+        'UPDATE `DisciplinaryRecord` SET warningLetterId = ? WHERE id IN (?)',
+        [created.insertId, offencesToLink.map((offence) => offence.id)]
+      );
 
-      return letter;
+      return tx.one('SELECT * FROM `WarningLetter` WHERE id = ?', [created.insertId]);
     });
 
     return res.status(201).json({
@@ -226,19 +285,14 @@ export const generateWarningLetter = async (req, res) => {
   }
 };
 
-// POST /api/warning-letters/:id/issue - Approve and issue warning letter (Admin only)
 export const issueWarningLetter = async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
-
+    const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       return res.status(400).json({ message: 'Invalid warning letter ID.' });
     }
 
-    const warningLetter = await prisma.warningLetter.findUnique({
-      where: { id },
-    });
-
+    const warningLetter = await queryOne('SELECT * FROM `WarningLetter` WHERE id = ?', [id]);
     if (!warningLetter) {
       return res.status(404).json({ message: 'Warning letter not found.' });
     }
@@ -247,13 +301,13 @@ export const issueWarningLetter = async (req, res) => {
       return res.status(400).json({ message: 'Warning letter has already been issued.' });
     }
 
-    const updated = await prisma.warningLetter.update({
-      where: { id },
-      data: {
-        status: 'ISSUED',
-        issuedDate: new Date(),
-      },
-    });
+    await query(
+      `UPDATE \`WarningLetter\`
+       SET status = 'ISSUED', issuedDate = NOW(3), updatedAt = NOW(3)
+       WHERE id = ?`,
+      [id]
+    );
+    const updated = await queryOne('SELECT * FROM `WarningLetter` WHERE id = ?', [id]);
 
     return res.status(200).json({
       message: 'Warning letter approved and issued successfully.',
@@ -265,19 +319,14 @@ export const issueWarningLetter = async (req, res) => {
   }
 };
 
-// DELETE /api/warning-letters/:id - Delete warning letter draft (Admin only)
 export const deleteWarningLetter = async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
-
+    const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       return res.status(400).json({ message: 'Invalid warning letter ID.' });
     }
 
-    const warningLetter = await prisma.warningLetter.findUnique({
-      where: { id },
-    });
-
+    const warningLetter = await queryOne('SELECT id, status FROM `WarningLetter` WHERE id = ?', [id]);
     if (!warningLetter) {
       return res.status(404).json({ message: 'Warning letter not found.' });
     }
@@ -286,15 +335,12 @@ export const deleteWarningLetter = async (req, res) => {
       return res.status(400).json({ message: 'Only warning letter drafts (PENDING status) can be deleted.' });
     }
 
-    await prisma.$transaction(async (tx) => {
-      await tx.disciplinaryRecord.updateMany({
-        where: { warningLetterId: id },
-        data: { warningLetterId: null },
-      });
-
-      await tx.warningLetter.delete({
-        where: { id },
-      });
+    await withTransaction(async (tx) => {
+      await tx.query(
+        'UPDATE `DisciplinaryRecord` SET warningLetterId = NULL WHERE warningLetterId = ?',
+        [id]
+      );
+      await tx.query('DELETE FROM `WarningLetter` WHERE id = ?', [id]);
     });
 
     return res.status(200).json({ message: 'Warning letter draft deleted successfully, offences returned to pool.' });
@@ -304,61 +350,72 @@ export const deleteWarningLetter = async (req, res) => {
   }
 };
 
-// GET /api/warning-letters/:id/pdf - Stream PDF of warning letter
 export const getWarningLetterPDF = async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
-
+    const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       return res.status(400).json({ message: 'Invalid warning letter ID.' });
     }
 
-    const warningLetter = await prisma.warningLetter.findUnique({
-      where: { id },
-      include: {
-        student: {
-          include: {
-            kursus: true,
-          }
-        },
-      },
-    });
+    const warningLetter = await queryOne(
+      `SELECT wl.*, s.studentNumber, s.icNumber, s.name, s.email, s.studentPhone, s.kursusId, s.cohort,
+              s.programType, s.semester, s.status AS studentStatus, s.parentName, s.parentPhone,
+              s.createdAt AS studentCreatedAt, s.updatedAt AS studentUpdatedAt,
+              k.id AS kursus_id, k.code AS kursus_code, k.name AS kursus_name
+       FROM \`WarningLetter\` wl
+       JOIN \`Student\` s ON s.studentNumber = wl.studentId
+       JOIN \`Kursus\` k ON k.id = s.kursusId
+       WHERE wl.id = ?`,
+      [id]
+    );
 
     if (!warningLetter) {
       return res.status(404).json({ message: 'Warning letter not found.' });
     }
 
-    // Teachers can only view/download ISSUED warning letters
     if (req.user.role === 'TEACHER' && warningLetter.status !== 'ISSUED') {
       return res.status(403).json({ message: 'Teachers are not authorized to preview warning letter drafts.' });
     }
 
-    // Include all offences committed by the student up to this warning tier
-    const cumulativeRecords = await prisma.disciplinaryRecord.findMany({
-      where: {
-        studentId: warningLetter.studentId,
-        warningLetter: {
-          warningTier: { lte: warningLetter.warningTier },
-        },
-      },
-      include: { offenceType: true },
-      orderBy: [{ date: 'asc' }, { id: 'asc' }],
+    const cumulativeRecords = await query(
+      `SELECT r.id, r.date, r.description,
+              o.id AS offenceType_id, o.code AS offenceType_code, o.name AS offenceType_name,
+              o.category AS offenceType_category, o.description AS offenceType_description
+       FROM \`DisciplinaryRecord\` r
+       JOIN \`OffenceType\` o ON o.id = r.offenceTypeId
+       JOIN \`WarningLetter\` w ON w.id = r.warningLetterId
+       WHERE r.studentId = ? AND w.warningTier <= ?
+       ORDER BY r.date ASC, r.id ASC`,
+      [warningLetter.studentId, warningLetter.warningTier]
+    );
+
+    const student = presentStudent({
+      studentNumber: warningLetter.studentNumber,
+      icNumber: warningLetter.icNumber,
+      name: warningLetter.name,
+      email: warningLetter.email,
+      studentPhone: warningLetter.studentPhone,
+      kursusId: warningLetter.kursusId,
+      cohort: warningLetter.cohort,
+      programType: warningLetter.programType,
+      semester: warningLetter.semester,
+      status: warningLetter.studentStatus,
+      parentName: warningLetter.parentName,
+      parentPhone: warningLetter.parentPhone,
+      createdAt: warningLetter.studentCreatedAt,
+      updatedAt: warningLetter.studentUpdatedAt,
+      kursus_id: warningLetter.kursus_id,
+      kursus_code: warningLetter.kursus_code,
+      kursus_name: warningLetter.kursus_name,
     });
 
-    // Adapt format to match what PDF generator expects
-    const studentWithDynamicClass = {
-      ...warningLetter.student,
-      program: warningLetter.student.kursus.name,
-      className: getClassName(warningLetter.student.semester, warningLetter.student.programType, warningLetter.student.kursus.code),
-    };
-
     const pdfBytes = await generateWarningPDF(
-      studentWithDynamicClass,
-      cumulativeRecords,
+      student,
+      cumulativeRecords.map((record) => mapOffence(record)),
       warningLetter.warningTier
     );
 
-    const safeStudentName = warningLetter.student.name.replace(/[^a-zA-Z0-9]/g, '_');
+    const safeStudentName = student.name.replace(/[^a-zA-Z0-9]/g, '_');
     const filename = `Surat_Amaran_${warningLetter.warningTier}_${safeStudentName}.pdf`;
 
     res.setHeader('Content-Type', 'application/pdf');

@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { prisma } from '../config/db.js';
+import { query, queryOne, withTransaction } from '../config/db.js';
+import { mapOffence, mapStudent } from '../config/rows.js';
 
 // Zod validation schema for student creation/update
 const studentSchema = z.object({
@@ -31,59 +32,58 @@ export const getAllStudents = async (req, res) => {
   try {
     const { search, kursusId, cohort, status } = req.query;
 
-    const whereClause = {};
+    const where = [];
+    const params = [];
 
     if (search) {
-      whereClause.OR = [
-        { name: { contains: search } },
-        { icNumber: { contains: search } },
-        { studentNumber: { contains: search } },
-        { parentPhone: { contains: search } },
-      ];
+      const term = `%${search}%`;
+      where.push('(s.name LIKE ? OR s.icNumber LIKE ? OR s.studentNumber LIKE ? OR s.parentPhone LIKE ?)');
+      params.push(term, term, term, term);
     }
 
     if (kursusId) {
-      whereClause.kursusId = parseInt(kursusId);
+      where.push('s.kursusId = ?');
+      params.push(parseInt(kursusId, 10));
     }
 
     if (cohort) {
-      whereClause.cohort = parseInt(cohort);
+      where.push('s.cohort = ?');
+      params.push(parseInt(cohort, 10));
     }
 
     if (status) {
-      whereClause.status = status;
+      where.push('s.status = ?');
+      params.push(status);
     }
 
-    const students = await prisma.student.findMany({
-      where: whereClause,
-      include: {
-        kursus: true,
-        _count: {
-          select: { records: true },
-        },
-      },
-      orderBy: { name: 'asc' },
-    });
+    const students = await query(
+      `SELECT s.*, k.code AS kursusCode, k.name AS kursusName,
+              (SELECT COUNT(*) FROM \`DisciplinaryRecord\` r WHERE r.studentId = s.studentNumber) AS offenceCount
+       FROM \`Student\` s
+       JOIN \`Kursus\` k ON k.id = s.kursusId
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY s.name ASC`,
+      params
+    );
 
-    // Simplify records count in response and include virtual className
     const formattedStudents = students.map((s) => ({
       studentNumber: s.studentNumber,
       icNumber: s.icNumber,
       name: s.name,
       kursusId: s.kursusId,
-      kursusCode: s.kursus.code,
-      kursusName: s.kursus.name,
+      kursusCode: s.kursusCode,
+      kursusName: s.kursusName,
       cohort: s.cohort,
       programType: s.programType,
       semester: s.semester,
       status: s.status,
-      className: getClassName(s.semester, s.programType, s.kursus.code),
+      className: getClassName(s.semester, s.programType, s.kursusCode),
       email: s.email,
       studentPhone: s.studentPhone,
       parentName: s.parentName,
       parentPhone: s.parentPhone,
       createdAt: s.createdAt,
-      offenceCount: s._count.records,
+      offenceCount: Number(s.offenceCount),
     }));
 
     return res.status(200).json(formattedStudents);
@@ -101,28 +101,35 @@ export const getStudentById = async (req, res) => {
       return res.status(400).json({ message: 'Invalid student ID.' });
     }
 
-    const student = await prisma.student.findUnique({
-      where: { studentNumber },
-      include: {
-        kursus: true,
-        records: {
-          include: {
-            offenceType: true,
-            teacher: {
-              select: { id: true, name: true, role: true },
-            },
-          },
-          orderBy: { date: 'desc' },
-        },
-      },
-    });
+    const row = await queryOne(
+      `SELECT s.*, k.id AS kursus_id, k.code AS kursus_code, k.name AS kursus_name
+       FROM \`Student\` s
+       JOIN \`Kursus\` k ON k.id = s.kursusId
+       WHERE s.studentNumber = ?`,
+      [studentNumber]
+    );
 
-    if (!student) {
+    if (!row) {
       return res.status(404).json({ message: 'Student not found.' });
     }
 
+    const student = mapStudent(row);
+    const recordRows = await query(
+      `SELECT r.id, r.studentId, r.offenceTypeId, r.teacherId, r.date, r.description, r.createdAt, r.warningLetterId,
+              o.id AS offenceType_id, o.code AS offenceType_code, o.name AS offenceType_name,
+              o.category AS offenceType_category, o.description AS offenceType_description,
+              u.id AS teacher_id, u.name AS teacher_name, u.role AS teacher_role
+       FROM \`DisciplinaryRecord\` r
+       JOIN \`OffenceType\` o ON o.id = r.offenceTypeId
+       JOIN \`User\` u ON u.id = r.teacherId
+       WHERE r.studentId = ?
+       ORDER BY r.date DESC`,
+      [studentNumber]
+    );
+
     const formatted = {
       ...student,
+      records: recordRows.map((record) => mapOffence(record, { includeTeacher: true })),
       kursusCode: student.kursus.code,
       kursusName: student.kursus.name,
       className: getClassName(student.semester, student.programType, student.kursus.code),
@@ -144,28 +151,35 @@ export const getStudentByIC = async (req, res) => {
       return res.status(400).json({ message: 'IC Number must be exactly 12 numeric digits.' });
     }
 
-    const student = await prisma.student.findUnique({
-      where: { icNumber },
-      include: {
-        kursus: true,
-        records: {
-          include: {
-            offenceType: true,
-            teacher: {
-              select: { id: true, name: true },
-            },
-          },
-          orderBy: { date: 'desc' },
-        },
-      },
-    });
+    const row = await queryOne(
+      `SELECT s.*, k.id AS kursus_id, k.code AS kursus_code, k.name AS kursus_name
+       FROM \`Student\` s
+       JOIN \`Kursus\` k ON k.id = s.kursusId
+       WHERE s.icNumber = ?`,
+      [icNumber]
+    );
 
-    if (!student) {
+    if (!row) {
       return res.status(404).json({ message: 'No student found with this IC number.' });
     }
 
+    const student = mapStudent(row);
+    const recordRows = await query(
+      `SELECT r.id, r.studentId, r.offenceTypeId, r.teacherId, r.date, r.description, r.createdAt, r.warningLetterId,
+              o.id AS offenceType_id, o.code AS offenceType_code, o.name AS offenceType_name,
+              o.category AS offenceType_category, o.description AS offenceType_description,
+              u.id AS teacher_id, u.name AS teacher_name
+       FROM \`DisciplinaryRecord\` r
+       JOIN \`OffenceType\` o ON o.id = r.offenceTypeId
+       JOIN \`User\` u ON u.id = r.teacherId
+       WHERE r.studentId = ?
+       ORDER BY r.date DESC`,
+      [student.studentNumber]
+    );
+
     const formatted = {
       ...student,
+      records: recordRows.map((record) => mapOffence(record, { includeTeacher: true, includeTeacherRole: false })),
       kursusCode: student.kursus.code,
       kursusName: student.kursus.name,
       className: getClassName(student.semester, student.programType, student.kursus.code),
@@ -202,37 +216,29 @@ export const createStudent = async (req, res) => {
     } = validation.data;
 
     // Check if IC already exists
-    const existingStudent = await prisma.student.findUnique({
-      where: { icNumber },
-    });
+    const existingStudent = await queryOne(
+      'SELECT studentNumber FROM `Student` WHERE icNumber = ?',
+      [icNumber]
+    );
     if (existingStudent) {
       return res.status(400).json({ message: 'A student with this IC number already exists.' });
     }
 
-    // Check if Student ID already exists
-    const existingNumber = await prisma.student.findUnique({
-      where: { studentNumber },
-    });
+    const existingNumber = await queryOne(
+      'SELECT studentNumber FROM `Student` WHERE studentNumber = ?',
+      [studentNumber]
+    );
     if (existingNumber) {
       return res.status(400).json({ message: 'A student with this Student ID already exists.' });
     }
 
-    const newStudent = await prisma.student.create({
-      data: {
-        studentNumber,
-        icNumber,
-        name,
-        email,
-        studentPhone,
-        kursusId,
-        cohort,
-        programType,
-        semester,
-        status,
-        parentName,
-        parentPhone,
-      },
-    });
+    await query(
+      `INSERT INTO \`Student\`
+        (studentNumber, icNumber, name, email, studentPhone, kursusId, cohort, programType, semester, status, parentName, parentPhone, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))`,
+      [studentNumber, icNumber, name, email, studentPhone, kursusId, cohort, programType, semester, status, parentName, parentPhone]
+    );
+    const newStudent = await queryOne('SELECT * FROM `Student` WHERE studentNumber = ?', [studentNumber]);
 
     return res.status(201).json({
       message: 'Student added successfully',
@@ -271,39 +277,29 @@ export const updateStudent = async (req, res) => {
       parentPhone,
     } = validation.data;
 
-    const student = await prisma.student.findUnique({
-      where: { studentNumber },
-    });
+    const student = await queryOne('SELECT * FROM `Student` WHERE studentNumber = ?', [studentNumber]);
     if (!student) {
       return res.status(404).json({ message: 'Student not found.' });
     }
 
-    // Check if new IC is already taken by another student
     if (icNumber !== student.icNumber) {
-      const existingStudent = await prisma.student.findUnique({
-        where: { icNumber },
-      });
+      const existingStudent = await queryOne(
+        'SELECT studentNumber FROM `Student` WHERE icNumber = ?',
+        [icNumber]
+      );
       if (existingStudent) {
         return res.status(400).json({ message: 'A student with this new IC number already exists.' });
       }
     }
 
-    const updatedStudent = await prisma.student.update({
-      where: { studentNumber },
-      data: {
-        icNumber,
-        name,
-        email,
-        studentPhone,
-        kursusId,
-        cohort,
-        programType,
-        semester,
-        status,
-        parentName,
-        parentPhone,
-      },
-    });
+    await query(
+      `UPDATE \`Student\`
+       SET icNumber = ?, name = ?, email = ?, studentPhone = ?, kursusId = ?, cohort = ?,
+           programType = ?, semester = ?, status = ?, parentName = ?, parentPhone = ?, updatedAt = NOW(3)
+       WHERE studentNumber = ?`,
+      [icNumber, name, email, studentPhone, kursusId, cohort, programType, semester, status, parentName, parentPhone, studentNumber]
+    );
+    const updatedStudent = await queryOne('SELECT * FROM `Student` WHERE studentNumber = ?', [studentNumber]);
 
     return res.status(200).json({
       message: 'Student updated successfully',
@@ -323,16 +319,12 @@ export const deleteStudent = async (req, res) => {
       return res.status(400).json({ message: 'Invalid student ID.' });
     }
 
-    const student = await prisma.student.findUnique({
-      where: { studentNumber },
-    });
+    const student = await queryOne('SELECT studentNumber FROM `Student` WHERE studentNumber = ?', [studentNumber]);
     if (!student) {
       return res.status(404).json({ message: 'Student not found.' });
     }
 
-    await prisma.student.delete({
-      where: { studentNumber },
-    });
+    await query('DELETE FROM `Student` WHERE studentNumber = ?', [studentNumber]);
 
     return res.status(200).json({ message: 'Student profile deleted successfully.' });
   } catch (error) {
@@ -354,14 +346,14 @@ export const promoteStudents = async (req, res) => {
       return res.status(400).json({ message: 'Invalid action type.' });
     }
 
-    const results = await prisma.$transaction(async (tx) => {
+    const results = await withTransaction(async (tx) => {
       const updated = [];
 
       for (const id of studentIds) {
-        const student = await tx.student.findUnique({ where: { studentNumber: id } });
+        const student = await tx.one('SELECT * FROM `Student` WHERE studentNumber = ?', [id]);
         if (!student) continue;
 
-        let updateData = {};
+        const updateData = {};
 
         if (action === 'PROMOTE') {
           if (student.programType === 'SVM' && student.semester < 4) {
@@ -381,10 +373,18 @@ export const promoteStudents = async (req, res) => {
         }
 
         if (Object.keys(updateData).length > 0) {
-          const up = await tx.student.update({
-            where: { studentNumber: id },
-            data: updateData,
-          });
+          await tx.query(
+            `UPDATE \`Student\`
+             SET semester = ?, programType = ?, status = ?, updatedAt = NOW(3)
+             WHERE studentNumber = ?`,
+            [
+              updateData.semester ?? student.semester,
+              updateData.programType ?? student.programType,
+              updateData.status ?? student.status,
+              id,
+            ]
+          );
+          const up = await tx.one('SELECT * FROM `Student` WHERE studentNumber = ?', [id]);
           updated.push(up);
         }
       }
@@ -405,9 +405,7 @@ export const promoteStudents = async (req, res) => {
 // GET /api/students/kursus - Fetch all courses (for dropdowns)
 export const getAllKursus = async (req, res) => {
   try {
-    const kursus = await prisma.kursus.findMany({
-      orderBy: { name: 'asc' },
-    });
+    const kursus = await query('SELECT id, code, name FROM `Kursus` ORDER BY name ASC');
     return res.status(200).json(kursus);
   } catch (error) {
     console.error('Get All Kursus Error:', error);
@@ -483,7 +481,7 @@ export const importStudents = async (req, res) => {
     }
 
     // 3. Load Courses
-    const courses = await prisma.kursus.findMany();
+    const courses = await query('SELECT id, code FROM `Kursus`');
     const courseMap = new Map(courses.map(k => [k.code.toUpperCase(), k.id]));
 
     // 4. Process each student row
@@ -586,39 +584,32 @@ export const importStudents = async (req, res) => {
         continue;
       }
 
-      // Try-Catch to handle unique index violations or Prisma DB errors
+      // Try-Catch to handle unique index violations
       try {
         const studentNum = rawStudentNum.toUpperCase();
-        await prisma.student.upsert({
-          where: { studentNumber: studentNum },
-          update: {
-            icNumber: cleanIc,
-            name: rawName,
-            email: rawEmail,
-            studentPhone: rawStudentPhone,
-            kursusId: targetKursusId,
-            cohort: parsedCohort,
-            programType: classProg,
-            semester: dbSemester,
-            parentName: rawParentName || 'Penjaga',
-            parentPhone: rawParentPhone || 'N/A',
-            status: 'ACTIVE',
-          },
-          create: {
-            studentNumber: studentNum,
-            icNumber: cleanIc,
-            name: rawName,
-            email: rawEmail,
-            studentPhone: rawStudentPhone,
-            kursusId: targetKursusId,
-            cohort: parsedCohort,
-            programType: classProg,
-            semester: dbSemester,
-            parentName: rawParentName || 'Penjaga',
-            parentPhone: rawParentPhone || 'N/A',
-            status: 'ACTIVE',
-          },
-        });
+        const parentName = rawParentName || 'Penjaga';
+        const parentPhone = rawParentPhone || 'N/A';
+        const existing = await queryOne(
+          'SELECT studentNumber FROM `Student` WHERE studentNumber = ?',
+          [studentNum]
+        );
+
+        if (existing) {
+          await query(
+            `UPDATE \`Student\`
+             SET icNumber = ?, name = ?, email = ?, studentPhone = ?, kursusId = ?, cohort = ?,
+                 programType = ?, semester = ?, parentName = ?, parentPhone = ?, status = 'ACTIVE', updatedAt = NOW(3)
+             WHERE studentNumber = ?`,
+            [cleanIc, rawName, rawEmail, rawStudentPhone, targetKursusId, parsedCohort, classProg, dbSemester, parentName, parentPhone, studentNum]
+          );
+        } else {
+          await query(
+            `INSERT INTO \`Student\`
+              (studentNumber, icNumber, name, email, studentPhone, kursusId, cohort, programType, semester, status, parentName, parentPhone, updatedAt)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, NOW(3))`,
+            [studentNum, cleanIc, rawName, rawEmail, rawStudentPhone, targetKursusId, parsedCohort, classProg, dbSemester, parentName, parentPhone]
+          );
+        }
         successCount++;
       } catch (dbErr) {
         console.error(`Import DB Error on row ${lineNum}:`, dbErr);

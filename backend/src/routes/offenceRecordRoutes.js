@@ -17,7 +17,7 @@ router.get('/:id(\\d+)', authenticate, getOffenceById);
 router.post('/', authenticate, createOffence);
 
 // Warning letter download
-router.get('/warning-letter/:studentId(\\d+)/:warningIndex(\\d+)', authenticate, downloadWarningLetter);
+router.get('/warning-letter/:studentId/:warningIndex(\\d+)', authenticate, downloadWarningLetter);
 
 // Admin-only routes
 router.put('/:id(\\d+)', authenticate, restrictTo('ADMIN'), updateOffence);

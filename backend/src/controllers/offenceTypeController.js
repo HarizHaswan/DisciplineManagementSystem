@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { prisma } from '../config/db.js';
+import { query, queryOne } from '../config/db.js';
 
 const offenceTypeSchema = z.object({
   code: z.string().min(2, 'Code must be at least 2 characters (e.g. A01)'),
@@ -8,12 +8,11 @@ const offenceTypeSchema = z.object({
   description: z.string().optional(),
 });
 
-// GET /api/offence-types - List all offence classifications
 export const getAllOffenceTypes = async (req, res) => {
   try {
-    const categories = await prisma.offenceType.findMany({
-      orderBy: { code: 'asc' },
-    });
+    const categories = await query(
+      'SELECT id, code, name, category, description FROM `OffenceType` ORDER BY code ASC'
+    );
     return res.status(200).json(categories);
   } catch (error) {
     console.error('Get All Offence Types Error:', error);
@@ -21,17 +20,17 @@ export const getAllOffenceTypes = async (req, res) => {
   }
 };
 
-// GET /api/offence-types/:id - Get details of an offence type
 export const getOffenceTypeById = async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       return res.status(400).json({ message: 'Invalid offence type ID.' });
     }
 
-    const oType = await prisma.offenceType.findUnique({
-      where: { id },
-    });
+    const oType = await queryOne(
+      'SELECT id, code, name, category, description FROM `OffenceType` WHERE id = ?',
+      [id]
+    );
 
     if (!oType) {
       return res.status(404).json({ message: 'Offence type not found.' });
@@ -44,7 +43,6 @@ export const getOffenceTypeById = async (req, res) => {
   }
 };
 
-// POST /api/offence-types - Create new offence type (Admin only)
 export const createOffenceType = async (req, res) => {
   try {
     const validation = offenceTypeSchema.safeParse(req.body);
@@ -53,24 +51,21 @@ export const createOffenceType = async (req, res) => {
     }
 
     const { code, name, category, description } = validation.data;
+    const upperCode = code.toUpperCase();
 
-    // Check unique code
-    const existingCode = await prisma.offenceType.findUnique({
-      where: { code: code.toUpperCase() },
-    });
-
+    const existingCode = await queryOne('SELECT id FROM `OffenceType` WHERE code = ?', [upperCode]);
     if (existingCode) {
       return res.status(400).json({ message: `Offence type code '${code}' already exists.` });
     }
 
-    const newOType = await prisma.offenceType.create({
-      data: {
-        code: code.toUpperCase(),
-        name,
-        category,
-        description,
-      },
-    });
+    const created = await query(
+      'INSERT INTO `OffenceType` (code, name, category, description) VALUES (?, ?, ?, ?)',
+      [upperCode, name, category, description ?? null]
+    );
+    const newOType = await queryOne(
+      'SELECT id, code, name, category, description FROM `OffenceType` WHERE id = ?',
+      [created.insertId]
+    );
 
     return res.status(201).json({
       message: 'Offence type created successfully',
@@ -82,10 +77,9 @@ export const createOffenceType = async (req, res) => {
   }
 };
 
-// PUT /api/offence-types/:id - Update offence type (Admin only)
 export const updateOffenceType = async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       return res.status(400).json({ message: 'Invalid offence type ID.' });
     }
@@ -96,35 +90,28 @@ export const updateOffenceType = async (req, res) => {
     }
 
     const { code, name, category, description } = validation.data;
+    const upperCode = code.toUpperCase();
 
-    // Check existence
-    const oType = await prisma.offenceType.findUnique({
-      where: { id },
-    });
-
+    const oType = await queryOne('SELECT id, code FROM `OffenceType` WHERE id = ?', [id]);
     if (!oType) {
       return res.status(404).json({ message: 'Offence type not found.' });
     }
 
-    // Check code duplication
-    if (code.toUpperCase() !== oType.code) {
-      const existingCode = await prisma.offenceType.findUnique({
-        where: { code: code.toUpperCase() },
-      });
+    if (upperCode !== oType.code) {
+      const existingCode = await queryOne('SELECT id FROM `OffenceType` WHERE code = ?', [upperCode]);
       if (existingCode) {
         return res.status(400).json({ message: `Offence type code '${code}' already exists.` });
       }
     }
 
-    const updatedOType = await prisma.offenceType.update({
-      where: { id },
-      data: {
-        code: code.toUpperCase(),
-        name,
-        category,
-        description,
-      },
-    });
+    await query(
+      'UPDATE `OffenceType` SET code = ?, name = ?, category = ?, description = ? WHERE id = ?',
+      [upperCode, name, category, description ?? null, id]
+    );
+    const updatedOType = await queryOne(
+      'SELECT id, code, name, category, description FROM `OffenceType` WHERE id = ?',
+      [id]
+    );
 
     return res.status(200).json({
       message: 'Offence type updated successfully',
@@ -136,26 +123,19 @@ export const updateOffenceType = async (req, res) => {
   }
 };
 
-// DELETE /api/offence-types/:id - Delete offence type (Admin only)
 export const deleteOffenceType = async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       return res.status(400).json({ message: 'Invalid offence type ID.' });
     }
 
-    const oType = await prisma.offenceType.findUnique({
-      where: { id },
-    });
-
+    const oType = await queryOne('SELECT id FROM `OffenceType` WHERE id = ?', [id]);
     if (!oType) {
       return res.status(404).json({ message: 'Offence type not found.' });
     }
 
-    await prisma.offenceType.delete({
-      where: { id },
-    });
-
+    await query('DELETE FROM `OffenceType` WHERE id = ?', [id]);
     return res.status(200).json({ message: 'Offence type deleted successfully.' });
   } catch (error) {
     console.error('Delete Offence Type Error:', error);

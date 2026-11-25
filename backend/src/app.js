@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { prisma } from './config/db.js';
+import { pool } from './config/db.js';
 
 // Load routes
 import authRoutes from './routes/authRoutes.js';
@@ -37,7 +37,7 @@ app.use((req, res, next) => {
 app.get('/api/health', async (req, res) => {
   try {
     // Quick db check
-    await prisma.$queryRaw`SELECT 1`;
+    await pool.query('SELECT 1');
     return res.status(200).json({ status: 'healthy', database: 'connected' });
   } catch (error) {
     return res.status(500).json({ status: 'unhealthy', database: 'disconnected', error: error.message });
@@ -71,8 +71,8 @@ app.use((err, req, res, next) => {
 // Run server and verify database connection
 const startServer = async () => {
   try {
-    console.log('Connecting to database via Prisma...');
-    await prisma.$connect();
+    console.log('Connecting to database...');
+    await pool.query('SELECT 1');
     console.log('Database connected successfully.');
 
     app.listen(PORT, () => {

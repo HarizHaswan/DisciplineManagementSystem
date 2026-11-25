@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import { prisma } from '../config/db.js';
+import { queryOne } from '../config/db.js';
 
 // Verify JWT token in request headers
 export const authenticate = async (req, res, next) => {
@@ -13,10 +13,10 @@ export const authenticate = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret');
 
     // Retrieve user from database to ensure they still exist and are active
-    const user = await prisma.user.findUnique({
-      where: { id: decoded.id },
-      select: { id: true, username: true, name: true, role: true },
-    });
+    const user = await queryOne(
+      'SELECT id, username, name, role FROM `User` WHERE id = ?',
+      [decoded.id]
+    );
 
     if (!user) {
       return res.status(401).json({ message: 'User not found or invalid session.' });

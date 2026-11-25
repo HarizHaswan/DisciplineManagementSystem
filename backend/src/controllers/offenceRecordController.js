@@ -1,80 +1,89 @@
 import { z } from 'zod';
-import { prisma } from '../config/db.js';
+import { query, queryOne } from '../config/db.js';
+import { mapOffence, mapStudent, OFFENCE_COLUMNS, OFFENCE_JOINS } from '../config/rows.js';
 import { generateWarningPDF } from '../services/pdfService.js';
 
 const offenceRecordSchema = z.object({
   studentId: z.string().min(3, 'Student ID (No. Pelajar) must be at least 3 characters'),
   offenceTypeId: z.number().int('Offence Type ID must be an integer'),
-  date: z.string().optional(), // ISO string from datepicker
+  date: z.string().optional(),
   description: z.string().min(5, 'Description must be at least 5 characters'),
 });
 
-// GET /api/offences - List all recorded offences
+const getClassName = (semester, programType, kursusCode) => {
+  if (programType === 'SVM') {
+    return `${semester} SVM ${kursusCode}`;
+  }
+  return `${semester - 4} DVM ${kursusCode}`;
+};
+
+async function findOffence(id, { includeTeacherRole = true } = {}) {
+  const row = await queryOne(
+    `SELECT ${OFFENCE_COLUMNS} ${OFFENCE_JOINS} WHERE r.id = ?`,
+    [id]
+  );
+  if (!row) return null;
+  return mapOffence(row, { includeStudent: true, includeTeacher: true, includeTeacherRole });
+}
+
 export const getAllOffences = async (req, res) => {
   try {
     const { studentId, category, search, startDate, endDate } = req.query;
-    const where = {};
+    const where = [];
+    const params = [];
 
     if (studentId) {
-      where.studentId = studentId; // String - No. Pelajar
+      where.push('r.studentId = ?');
+      params.push(studentId);
     }
 
     if (category) {
-      where.offenceType = { category };
+      where.push('o.category = ?');
+      params.push(category);
     }
 
-    if (startDate || endDate) {
-      where.date = {};
-      if (startDate) where.date.gte = new Date(startDate);
-      if (endDate) where.date.lte = new Date(endDate);
+    if (startDate) {
+      where.push('r.date >= ?');
+      params.push(new Date(startDate));
+    }
+
+    if (endDate) {
+      where.push('r.date <= ?');
+      params.push(new Date(endDate));
     }
 
     if (search) {
-      where.OR = [
-        { student: { name: { contains: search } } },
-        { student: { icNumber: { contains: search } } },
-        { description: { contains: search } },
-      ];
+      const term = `%${search}%`;
+      where.push('(s.name LIKE ? OR s.icNumber LIKE ? OR r.description LIKE ?)');
+      params.push(term, term, term);
     }
 
-    const offences = await prisma.disciplinaryRecord.findMany({
-      where,
-      include: {
-        student: true,
-        offenceType: true,
-        teacher: {
-          select: { id: true, name: true, role: true },
-        },
-      },
-      orderBy: { date: 'desc' },
-    });
+    const rows = await query(
+      `SELECT ${OFFENCE_COLUMNS}
+       ${OFFENCE_JOINS}
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY r.date DESC`,
+      params
+    );
 
-    return res.status(200).json(offences);
+    return res.status(200).json(rows.map((row) => mapOffence(row, {
+      includeStudent: true,
+      includeTeacher: true,
+    })));
   } catch (error) {
     console.error('Get All Offences Error:', error);
     return res.status(500).json({ message: 'Internal server error while fetching offence records.' });
   }
 };
 
-// GET /api/offences/:id - Get detailed offence record
 export const getOffenceById = async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       return res.status(400).json({ message: 'Invalid record ID.' });
     }
 
-    const record = await prisma.disciplinaryRecord.findUnique({
-      where: { id },
-      include: {
-        student: true,
-        offenceType: true,
-        teacher: {
-          select: { id: true, name: true },
-        },
-      },
-    });
-
+    const record = await findOffence(id, { includeTeacherRole: false });
     if (!record) {
       return res.status(404).json({ message: 'Disciplinary record not found.' });
     }
@@ -86,7 +95,6 @@ export const getOffenceById = async (req, res) => {
   }
 };
 
-// POST /api/offences - Log a new offence (Teachers and Admins)
 export const createOffence = async (req, res) => {
   try {
     const validation = offenceRecordSchema.safeParse(req.body);
@@ -95,43 +103,36 @@ export const createOffence = async (req, res) => {
     }
 
     const { studentId, offenceTypeId, date, description } = validation.data;
-    const teacherId = req.user.id; // From auth middleware
+    const teacherId = req.user.id;
 
-    // Validate student exists
-    const student = await prisma.student.findUnique({
-      where: { studentNumber: studentId },
-    });
+    const student = await queryOne('SELECT studentNumber FROM `Student` WHERE studentNumber = ?', [studentId]);
     if (!student) {
       return res.status(404).json({ message: 'Student not found.' });
     }
 
-    // Validate offence type exists
-    const oType = await prisma.offenceType.findUnique({
-      where: { id: offenceTypeId },
-    });
+    const oType = await queryOne('SELECT id FROM `OffenceType` WHERE id = ?', [offenceTypeId]);
     if (!oType) {
       return res.status(404).json({ message: 'Offence type not found.' });
     }
 
-    // Create record
-    const record = await prisma.disciplinaryRecord.create({
-      data: {
-        studentId,
-        offenceTypeId,
-        teacherId,
-        date: date ? new Date(date) : new Date(),
-        description,
-      },
-      include: {
-        student: true,
-        offenceType: true,
-      },
-    });
+    const created = await query(
+      `INSERT INTO \`DisciplinaryRecord\` (studentId, offenceTypeId, teacherId, date, description)
+       VALUES (?, ?, ?, ?, ?)`,
+      [studentId, offenceTypeId, teacherId, date ? new Date(date) : new Date(), description]
+    );
 
-    // Check count of offences for this student to see if warning triggers
-    const totalOffences = await prisma.disciplinaryRecord.count({
-      where: { studentId },
-    });
+    const row = await queryOne(
+      `SELECT ${OFFENCE_COLUMNS} ${OFFENCE_JOINS} WHERE r.id = ?`,
+      [created.insertId]
+    );
+    const record = mapOffence(row, { includeStudent: true });
+    delete record.teacher;
+
+    const totalRow = await queryOne(
+      'SELECT COUNT(*) AS count FROM `DisciplinaryRecord` WHERE studentId = ?',
+      [studentId]
+    );
+    const totalOffences = Number(totalRow.count);
 
     let warningTriggered = false;
     let warningIndex = 0;
@@ -167,10 +168,9 @@ export const createOffence = async (req, res) => {
   }
 };
 
-// PUT /api/offences/:id - Update offence details (Admin only)
 export const updateOffence = async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       return res.status(400).json({ message: 'Invalid record ID.' });
     }
@@ -182,34 +182,26 @@ export const updateOffence = async (req, res) => {
 
     const { studentId, offenceTypeId, date, description } = validation.data;
 
-    // Check record exists
-    const record = await prisma.disciplinaryRecord.findUnique({
-      where: { id },
-    });
+    const record = await queryOne('SELECT id, date FROM `DisciplinaryRecord` WHERE id = ?', [id]);
     if (!record) {
       return res.status(404).json({ message: 'Disciplinary record not found.' });
     }
 
-    // Verify student & offence type exist
-    const studentExist = await prisma.student.findUnique({ where: { studentNumber: studentId } });
+    const studentExist = await queryOne('SELECT studentNumber FROM `Student` WHERE studentNumber = ?', [studentId]);
     if (!studentExist) return res.status(404).json({ message: 'Student not found.' });
 
-    const oTypeExist = await prisma.offenceType.findUnique({ where: { id: offenceTypeId } });
+    const oTypeExist = await queryOne('SELECT id FROM `OffenceType` WHERE id = ?', [offenceTypeId]);
     if (!oTypeExist) return res.status(404).json({ message: 'Offence type not found.' });
 
-    const updatedRecord = await prisma.disciplinaryRecord.update({
-      where: { id },
-      data: {
-        studentId,
-        offenceTypeId,
-        date: date ? new Date(date) : record.date,
-        description,
-      },
-      include: {
-        student: true,
-        offenceType: true,
-      },
-    });
+    await query(
+      `UPDATE \`DisciplinaryRecord\`
+       SET studentId = ?, offenceTypeId = ?, date = ?, description = ?
+       WHERE id = ?`,
+      [studentId, offenceTypeId, date ? new Date(date) : record.date, description, id]
+    );
+
+    const updatedRecord = await findOffence(id);
+    delete updatedRecord.teacher;
 
     return res.status(200).json({
       message: 'Record updated successfully.',
@@ -221,26 +213,19 @@ export const updateOffence = async (req, res) => {
   }
 };
 
-// DELETE /api/offences/:id - Delete offence record (Admin only)
 export const deleteOffence = async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       return res.status(400).json({ message: 'Invalid record ID.' });
     }
 
-    const record = await prisma.disciplinaryRecord.findUnique({
-      where: { id },
-    });
-
+    const record = await queryOne('SELECT id FROM `DisciplinaryRecord` WHERE id = ?', [id]);
     if (!record) {
       return res.status(404).json({ message: 'Disciplinary record not found.' });
     }
 
-    await prisma.disciplinaryRecord.delete({
-      where: { id },
-    });
-
+    await query('DELETE FROM `DisciplinaryRecord` WHERE id = ?', [id]);
     return res.status(200).json({ message: 'Disciplinary record deleted successfully.' });
   } catch (error) {
     console.error('Delete Offence Error:', error);
@@ -248,48 +233,54 @@ export const deleteOffence = async (req, res) => {
   }
 };
 
-// GET /api/offences/warning-letter/:studentId/:warningIndex - Generate and download PDF
 export const downloadWarningLetter = async (req, res) => {
   try {
-    const studentId = parseInt(req.params.studentId);
-    const warningIndex = parseInt(req.params.warningIndex);
+    const studentNumber = req.params.studentId;
+    const warningIndex = parseInt(req.params.warningIndex, 10);
 
-    if (isNaN(studentId) || isNaN(warningIndex) || warningIndex < 1 || warningIndex > 3) {
+    if (!studentNumber || isNaN(warningIndex) || warningIndex < 1 || warningIndex > 3) {
       return res.status(400).json({ message: 'Invalid parameters provided.' });
     }
 
-    const student = await prisma.student.findUnique({
-      where: { id: studentId },
-    });
-
-    if (!student) {
+    const row = await queryOne(
+      `SELECT s.*, k.code AS kursus_code
+       FROM \`Student\` s
+       JOIN \`Kursus\` k ON k.id = s.kursusId
+       WHERE s.studentNumber = ?`,
+      [studentNumber]
+    );
+    if (!row) {
       return res.status(404).json({ message: 'Student not found.' });
     }
 
-    // Retrieve all recorded offences for the student to display in the letter
-    const records = await prisma.disciplinaryRecord.findMany({
-      where: { studentId },
-      include: { offenceType: true },
-      orderBy: { date: 'asc' },
-    });
+    const student = {
+      ...mapStudent(row),
+      className: getClassName(row.semester, row.programType, row.kursus_code),
+    };
 
-    // Double check that student qualifies for the letter
-    // 3 offences -> Warning 1
-    // 4 offences -> Warning 2
-    // 5+ offences -> Suspension (Warning 3)
-    if (warningIndex === 1 && records.length < 3) {
+    const records = await query(
+      `SELECT r.id, r.date, r.description,
+              o.id AS offenceType_id, o.code AS offenceType_code, o.name AS offenceType_name,
+              o.category AS offenceType_category, o.description AS offenceType_description
+       FROM \`DisciplinaryRecord\` r
+       JOIN \`OffenceType\` o ON o.id = r.offenceTypeId
+       WHERE r.studentId = ?
+       ORDER BY r.date ASC`,
+      [studentNumber]
+    );
+    const mappedRecords = records.map((record) => mapOffence(record));
+
+    if (warningIndex === 1 && mappedRecords.length < 3) {
       return res.status(400).json({ message: 'Student does not qualify for Warning Letter 1 (requires at least 3 offences).' });
     }
-    if (warningIndex === 2 && records.length < 4) {
+    if (warningIndex === 2 && mappedRecords.length < 4) {
       return res.status(400).json({ message: 'Student does not qualify for Warning Letter 2 (requires at least 4 offences).' });
     }
-    if (warningIndex === 3 && records.length < 5) {
+    if (warningIndex === 3 && mappedRecords.length < 5) {
       return res.status(400).json({ message: 'Student does not qualify for Suspension / Warning Letter 3 (requires at least 5 offences).' });
     }
 
-    // Generate PDF bytes
-    const pdfBytes = await generateWarningPDF(student, records, warningIndex);
-
+    const pdfBytes = await generateWarningPDF(student, mappedRecords, warningIndex);
     const safeStudentName = student.name.replace(/[^a-zA-Z0-9]/g, '_');
     const filename = `Surat_Amaran_${warningIndex}_${safeStudentName}.pdf`;
 

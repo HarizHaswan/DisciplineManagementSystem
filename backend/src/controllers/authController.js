@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
-import { prisma } from '../config/db.js';
+import { query, queryOne } from '../config/db.js';
 
 // Zod schemas for input validation
 const loginSchema = z.object({
@@ -27,9 +27,10 @@ export const login = async (req, res) => {
     const { username, password } = validation.data;
 
     // Check if user exists
-    const user = await prisma.user.findUnique({
-      where: { username: username.toLowerCase() },
-    });
+    const user = await queryOne(
+      'SELECT id, username, password, name, role FROM `User` WHERE username = ?',
+      [username.toLowerCase()]
+    );
 
     if (!user) {
       return res.status(401).json({ message: 'Invalid username or password.' });
@@ -77,9 +78,10 @@ export const register = async (req, res) => {
     const lowerUsername = username.toLowerCase();
 
     // Check if username is already taken
-    const existingUser = await prisma.user.findUnique({
-      where: { username: lowerUsername },
-    });
+    const existingUser = await queryOne(
+      'SELECT id FROM `User` WHERE username = ?',
+      [lowerUsername]
+    );
 
     if (existingUser) {
       return res.status(400).json({ message: 'Username is already taken.' });
@@ -89,21 +91,14 @@ export const register = async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Create the user
-    const newUser = await prisma.user.create({
-      data: {
-        username: lowerUsername,
-        password: hashedPassword,
-        name,
-        role,
-      },
-      select: {
-        id: true,
-        username: true,
-        name: true,
-        role: true,
-        createdAt: true,
-      },
-    });
+    const created = await query(
+      'INSERT INTO `User` (username, password, name, role, updatedAt) VALUES (?, ?, ?, ?, NOW(3))',
+      [lowerUsername, hashedPassword, name, role]
+    );
+    const newUser = await queryOne(
+      'SELECT id, username, name, role, createdAt FROM `User` WHERE id = ?',
+      [created.insertId]
+    );
 
     return res.status(201).json({
       message: 'User registered successfully',

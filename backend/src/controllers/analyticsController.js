@@ -1,75 +1,50 @@
-import { prisma } from '../config/db.js';
+import { query, queryOne } from '../config/db.js';
 
 export const getDashboardStats = async (req, res) => {
   try {
-    // 1. Core counters
-    const [studentCount, offenceCount, teacherCount] = await Promise.all([
-      prisma.student.count(),
-      prisma.disciplinaryRecord.count(),
-      prisma.user.count({ where: { role: 'TEACHER' } }),
+    const [studentCountRow, offenceCountRow, teacherCountRow] = await Promise.all([
+      queryOne('SELECT COUNT(*) AS count FROM `Student`'),
+      queryOne('SELECT COUNT(*) AS count FROM `DisciplinaryRecord`'),
+      queryOne("SELECT COUNT(*) AS count FROM `User` WHERE role = 'TEACHER'"),
     ]);
 
-    // 2. Fetch all offence records with student & kursus relationships
-    const records = await prisma.disciplinaryRecord.findMany({
-      include: {
-        offenceType: true,
-        student: {
-          include: {
-            kursus: true,
-          }
-        },
-      },
-    });
+    const records = await query(
+      `SELECT r.date, o.category AS offenceCategory, o.name AS offenceName, k.name AS kursusName
+       FROM \`DisciplinaryRecord\` r
+       JOIN \`OffenceType\` o ON o.id = r.offenceTypeId
+       JOIN \`Student\` s ON s.studentNumber = r.studentId
+       JOIN \`Kursus\` k ON k.id = s.kursusId`
+    );
 
-    // 3. Aggregate: Category Counts (Major, Medium, Minor)
     const categories = { Major: 0, Medium: 0, Minor: 0 };
-    
-    // 4. Aggregate: Top Offences (Name -> Count)
     const offenceFrequency = {};
-
-    // 5. Aggregate: By Kursus / Course
     const programDistribution = {};
-
-    // 6. Aggregate: By Month (Format: "YYYY-MM")
     const monthlyTrend = {};
 
-    // Loop once to aggregate all stats
     records.forEach((rec) => {
-      if (!rec.student) return;
-
-      // Category
-      const cat = rec.offenceType.category;
+      const cat = rec.offenceCategory;
       if (categories[cat] !== undefined) {
         categories[cat]++;
       }
 
-      // Specific Offence Name
-      const offName = rec.offenceType.name;
-      offenceFrequency[offName] = (offenceFrequency[offName] || 0) + 1;
+      offenceFrequency[rec.offenceName] = (offenceFrequency[rec.offenceName] || 0) + 1;
+      programDistribution[rec.kursusName] = (programDistribution[rec.kursusName] || 0) + 1;
 
-      // Program / Course Name
-      const prog = rec.student.kursus.name;
-      programDistribution[prog] = (programDistribution[prog] || 0) + 1;
-
-      // Month
       const dateObj = new Date(rec.date);
       const yearMonth = dateObj.toLocaleString('default', { month: 'short', year: '2-digit' });
       monthlyTrend[yearMonth] = (monthlyTrend[yearMonth] || 0) + 1;
     });
 
-    // Formulate top offences list (sorted)
     const topOffences = Object.entries(offenceFrequency)
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 5);
 
-    // Formulate program distribution list
     const programStats = Object.entries(programDistribution).map(([name, count]) => ({
       name,
       count,
     }));
 
-    // Formulate monthly trend list (sorted chronologically)
     const months = [];
     const now = new Date();
     for (let i = 5; i >= 0; i--) {
@@ -81,36 +56,29 @@ export const getDashboardStats = async (req, res) => {
       });
     }
 
-    // 7. Top 5 Students with highest offences count
-    const studentsWithOffences = await prisma.student.findMany({
-      select: {
-        studentNumber: true,
-        name: true,
-        kursus: {
-          select: { name: true }
-        },
-        _count: {
-          select: { records: true },
-        },
-      },
-    });
+    const studentsWithOffences = await query(
+      `SELECT s.studentNumber, s.name, k.name AS program, COUNT(r.id) AS offenceCount
+       FROM \`Student\` s
+       JOIN \`Kursus\` k ON k.id = s.kursusId
+       LEFT JOIN \`DisciplinaryRecord\` r ON r.studentId = s.studentNumber
+       GROUP BY s.studentNumber, s.name, k.name
+       HAVING COUNT(r.id) > 0
+       ORDER BY offenceCount DESC
+       LIMIT 5`
+    );
 
-    const topStudents = studentsWithOffences
-      .map((student) => ({
-        id: student.studentNumber,
-        name: student.name,
-        program: student.kursus.name,
-        offenceCount: student._count.records,
-      }))
-      .filter((s) => s.offenceCount > 0)
-      .sort((a, b) => b.offenceCount - a.offenceCount)
-      .slice(0, 5);
+    const topStudents = studentsWithOffences.map((student) => ({
+      id: student.studentNumber,
+      name: student.name,
+      program: student.program,
+      offenceCount: Number(student.offenceCount),
+    }));
 
     return res.status(200).json({
       summary: {
-        totalStudents: studentCount,
-        totalOffences: offenceCount,
-        totalTeachers: teacherCount,
+        totalStudents: Number(studentCountRow.count),
+        totalOffences: Number(offenceCountRow.count),
+        totalTeachers: Number(teacherCountRow.count),
       },
       categories,
       topOffences,
