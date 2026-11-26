@@ -461,11 +461,11 @@ export const importStudents = async (req, res) => {
       return res.status(400).json({ message: 'Fail CSV tidak mengandungi data pelajar.' });
     }
 
-    // 2. Identify Headers
+    // 2. Identify Headers (all optional except at least one identifier column)
     const headers = rows[0].map(h => h.trim().toLowerCase());
     
     const idxName = headers.findIndex(h => /nama\s+penuh|nama/i.test(h));
-    const idxIc = headers.findIndex(h => /no\s+ic|nric|ic\s+number/i.test(h));
+    const idxIc = headers.findIndex(h => /no\s+ic|nric|ic\s+number|ic/i.test(h));
     const idxStudentNum = headers.findIndex(h => /no\s+pelajar|student\s+number|student\s+id/i.test(h));
     const idxKelas = headers.findIndex(h => /kelas|class/i.test(h));
     const idxCohort = headers.findIndex(h => /kohort|cohort/i.test(h));
@@ -474,15 +474,20 @@ export const importStudents = async (req, res) => {
     const idxParentName = headers.findIndex(h => /nama\s+penjaga|parent\s+name|nama\s+bapa|nama\s+ibu/i.test(h));
     const idxParentPhone = headers.findIndex(h => /tel\s+penjaga|parent\s+phone|telefon\s+penjaga/i.test(h));
 
-    if (idxName === -1 || idxIc === -1 || idxStudentNum === -1 || idxKelas === -1 || idxCohort === -1 || idxEmail === -1 || idxStudentPhone === -1) {
+    if (idxName === -1 && idxIc === -1 && idxStudentNum === -1) {
       return res.status(400).json({
-        message: 'Fail CSV mestilah mempunyai kolum NAMA PENUH, NO IC, NO PELAJAR, KELAS, KOHORT, EMAIL, dan TEL PELAJAR.'
+        message: 'Fail CSV mestilah mempunyai sekurang-kurangnya satu kolum pengenalan (NAMA PENUH, NO IC, atau NO PELAJAR).'
       });
     }
 
     // 3. Load Courses
-    const courses = await query('SELECT id, code FROM `Kursus`');
+    const courses = await query('SELECT id, code FROM `Kursus` ORDER BY id ASC');
+    if (courses.length === 0) {
+      return res.status(400).json({ message: 'Tiada rekod kursus ditemui dalam pangkalan data.' });
+    }
     const courseMap = new Map(courses.map(k => [k.code.toUpperCase(), k.id]));
+    const defaultKursusId = courses[0].id;
+    const defaultCohort = new Date().getFullYear();
 
     // 4. Process each student row
     const errors = [];
@@ -490,103 +495,71 @@ export const importStudents = async (req, res) => {
 
     for (let r = 1; r < rows.length; r++) {
       const row = rows[r];
-      if (row.length < 5) continue; // skip empty lines or short lines
+      if (!row || row.every(cell => !cell?.trim())) continue; // skip completely empty lines
 
-      const rawName = row[idxName]?.trim() || '';
-      const rawIc = row[idxIc]?.trim() || '';
-      const rawStudentNum = row[idxStudentNum]?.trim() || '';
-      const rawKelas = row[idxKelas]?.trim() || '';
-      const rawCohort = row[idxCohort]?.trim() || '';
-      const rawEmail = row[idxEmail]?.trim() || '';
-      const rawStudentPhone = row[idxStudentPhone]?.trim() || '';
+      const rawName = idxName !== -1 ? row[idxName]?.trim() || '' : '';
+      const rawIc = idxIc !== -1 ? row[idxIc]?.trim() || '' : '';
+      const rawStudentNum = idxStudentNum !== -1 ? row[idxStudentNum]?.trim() || '' : '';
+      const rawKelas = idxKelas !== -1 ? row[idxKelas]?.trim() || '' : '';
+      const rawCohort = idxCohort !== -1 ? row[idxCohort]?.trim() || '' : '';
+      const rawEmail = idxEmail !== -1 ? row[idxEmail]?.trim() || '' : '';
+      const rawStudentPhone = idxStudentPhone !== -1 ? row[idxStudentPhone]?.trim() || '' : '';
       const rawParentName = idxParentName !== -1 ? row[idxParentName]?.trim() || '' : '';
       const rawParentPhone = idxParentPhone !== -1 ? row[idxParentPhone]?.trim() || '' : '';
 
       const lineNum = r + 1;
 
-      // Basic column validation
-      if (!rawName && !rawIc && !rawStudentNum && !rawKelas && !rawCohort && !rawEmail && !rawStudentPhone) {
-        // Line is empty, skip quietly
+      // Skip row if no identifying info at all
+      if (!rawName && !rawIc && !rawStudentNum) {
         continue;
       }
 
-      if (!rawName || !rawIc || !rawStudentNum || !rawKelas || !rawCohort || !rawEmail || !rawStudentPhone) {
-        errors.push({ line: lineNum, message: 'Terdapat ruangan wajib yang kosong (NAMA PENUH, NO IC, NO PELAJAR, KELAS, KOHORT, EMAIL, atau TEL PELAJAR).' });
-        continue;
-      }
+      // Normalize identifiers with safe fallbacks if partially populated
+      const digitsIc = rawIc.replace(/\D/g, '');
+      const cleanIcBase = digitsIc || rawIc;
+      const studentNum = (rawStudentNum || cleanIcBase || `TMP-${lineNum}-${Date.now()}`).toUpperCase();
+      const cleanIc = cleanIcBase || `TMP-${studentNum}`;
+      const studentName = rawName || studentNum;
+      const studentEmail = rawEmail || null;
+      const studentPhone = rawStudentPhone || null;
 
-      // Name validation
-      if (rawName.length < 2) {
-        errors.push({ line: lineNum, message: 'Nama Pelajar mestilah sekurang-kurangnya 2 aksara.' });
-        continue;
-      }
+      // Cohort: parse if valid, otherwise default to current year
+      const parsedCohortNum = parseInt(rawCohort, 10);
+      const parsedCohort = !isNaN(parsedCohortNum) && parsedCohortNum >= 2000 && parsedCohortNum <= 2100
+        ? parsedCohortNum
+        : defaultCohort;
 
-      // IC Number validation
-      const cleanIc = rawIc.replace(/\D/g, '');
-      if (cleanIc.length !== 12) {
-        errors.push({ line: lineNum, message: 'No. IC mestilah mengandungi 12 digit nombor sahaja.' });
-        continue;
-      }
+      // Class Parsing: try standard format first, otherwise fallback safely
+      let classProg = /dvm/i.test(rawKelas) ? 'DVM' : 'SVM';
+      let dbSemester = 1;
+      let targetKursusId = defaultKursusId;
 
-      // Student ID validation
-      if (rawStudentNum.length < 3) {
-        errors.push({ line: lineNum, message: 'No. Pelajar mestilah sekurang-kurangnya 3 aksara.' });
-        continue;
-      }
-
-      // Email validation
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(rawEmail)) {
-        errors.push({ line: lineNum, message: 'Format alamat email tidak sah.' });
-        continue;
-      }
-
-      // Student Phone validation
-      if (rawStudentPhone.length < 6) {
-        errors.push({ line: lineNum, message: 'No. telefon pelajar sekurang-kurangnya 6 aksara.' });
-        continue;
-      }
-
-      // Cohort validation
-      const parsedCohort = parseInt(rawCohort);
-      if (isNaN(parsedCohort) || parsedCohort < 2000 || parsedCohort > 2100) {
-        errors.push({ line: lineNum, message: 'Kohort mestilah tahun kemasukan yang sah (cth. 2026).' });
-        continue;
-      }
-
-      // Class Parsing: ^(\d+)\s+(SVM|DVM)\s+(\w+)$
       const classMatch = rawKelas.match(/^(\d+)\s+(SVM|DVM)\s+(\w+)$/i);
-      if (!classMatch) {
-        errors.push({ line: lineNum, message: `Format KELAS '${rawKelas}' tidak sah. Cth format: 1 SVM CMB` });
-        continue;
-      }
-
-      const classSem = parseInt(classMatch[1]);
-      const classProg = classMatch[2].toUpperCase();
-      const classCourseCode = classMatch[3].toUpperCase();
-
-      // Validate parsed course code
-      const targetKursusId = courseMap.get(classCourseCode);
-      if (!targetKursusId) {
-        errors.push({ line: lineNum, message: `Kod Kursus '${classCourseCode}' tidak wujud dalam database.` });
-        continue;
-      }
-
-      // Compute database semester level
-      let dbSemester = classSem;
-      if (classProg === 'DVM') {
-        dbSemester = classSem + 4;
-      }
-
-      // Validate semester range
-      if (dbSemester < 1 || dbSemester > 9) {
-        errors.push({ line: lineNum, message: `Peringkat semester tidak sah untuk program ${classProg}.` });
-        continue;
+      if (classMatch) {
+        const classSem = parseInt(classMatch[1], 10);
+        classProg = classMatch[2].toUpperCase();
+        const classCourseCode = classMatch[3].toUpperCase();
+        targetKursusId = courseMap.get(classCourseCode) || defaultKursusId;
+        dbSemester = classProg === 'DVM' ? classSem + 4 : classSem;
+        if (dbSemester < 1 || dbSemester > 9) {
+          dbSemester = classProg === 'DVM' ? 5 : 1;
+        }
+      } else if (rawKelas) {
+        const semMatch = rawKelas.match(/\d+/);
+        if (semMatch) {
+          const semNum = parseInt(semMatch[0], 10);
+          dbSemester = classProg === 'DVM' ? Math.min(9, Math.max(5, semNum + 4)) : Math.min(4, Math.max(1, semNum));
+        }
+        for (const [code, id] of courseMap.entries()) {
+          if (rawKelas.toUpperCase().includes(code)) {
+            targetKursusId = id;
+            break;
+          }
+        }
       }
 
       // Try-Catch to handle unique index violations
       try {
-        const studentNum = rawStudentNum.toUpperCase();
         const parentName = rawParentName || 'Penjaga';
         const parentPhone = rawParentPhone || 'N/A';
         const existing = await queryOne(
@@ -600,14 +573,14 @@ export const importStudents = async (req, res) => {
              SET icNumber = ?, name = ?, email = ?, studentPhone = ?, kursusId = ?, cohort = ?,
                  programType = ?, semester = ?, parentName = ?, parentPhone = ?, status = 'ACTIVE', updatedAt = NOW(3)
              WHERE studentNumber = ?`,
-            [cleanIc, rawName, rawEmail, rawStudentPhone, targetKursusId, parsedCohort, classProg, dbSemester, parentName, parentPhone, studentNum]
+            [cleanIc, studentName, studentEmail, studentPhone, targetKursusId, parsedCohort, classProg, dbSemester, parentName, parentPhone, studentNum]
           );
         } else {
           await query(
             `INSERT INTO \`Student\`
               (studentNumber, icNumber, name, email, studentPhone, kursusId, cohort, programType, semester, status, parentName, parentPhone, updatedAt)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, NOW(3))`,
-            [studentNum, cleanIc, rawName, rawEmail, rawStudentPhone, targetKursusId, parsedCohort, classProg, dbSemester, parentName, parentPhone]
+            [studentNum, cleanIc, studentName, studentEmail, studentPhone, targetKursusId, parsedCohort, classProg, dbSemester, parentName, parentPhone]
           );
         }
         successCount++;
